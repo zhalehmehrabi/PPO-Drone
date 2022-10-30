@@ -1,5 +1,0 @@
-<launch>
-    <include file="$(find drone_test)/launch/main.launch">
-    </include>
-</launch>
- 

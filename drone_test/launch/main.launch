@@ -1,7 +1,0 @@
-<?xml version="1.0"?>
-<launch>
-  <include file="$(find drone_test)/launch/start_world.launch">
-  </include>
-  <include file="$(find drone_test)/launch/put_robot_in_world.launch"/>
-
-</launch>
