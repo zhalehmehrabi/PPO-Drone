@@ -2,11 +2,9 @@
 # ---------------------------------------------------
 import numpy as np
 
-from pid import PID
 from gazebo_msgs.msg import ModelStates
 from std_msgs.msg import Float64MultiArray, Float32
 from geometry_msgs.msg import Pose
-from tf.transformations import euler_from_quaternion
 
 import numpy
 import rospy
@@ -39,8 +37,9 @@ from gym.envs.registration import register
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Vector3
 from tf.transformations import euler_from_quaternion
-import controller
-from stable_baselines3.common.env_checker import check_env
+from tf.transformations import quaternion_from_euler
+
+import transforms
 
 timestep_limit_per_episode = 10000  # Can be any Value
 
@@ -51,29 +50,6 @@ register(
 )
 
 
-def initial_pose():
-    pose = Point()
-    pose.x = 0
-    pose.y = 0
-    pose.z = 0
-    return pose
-
-
-def initial_goal(goalArray):
-    desired_points = []
-    for (x, y, z) in goalArray:
-        temp = Point()
-        temp.x = x
-        temp.y = y
-        temp.z = z
-        desired_points.append(temp)
-    return desired_points
-
-
-def initial_orientation():
-    return [0, 0, 0]
-
-
 def initial_linear_angular_velocity():
     t = Vector3()
     t.x = 0
@@ -82,12 +58,61 @@ def initial_linear_angular_velocity():
     return t
 
 
+def initial_pose(transformation):
+    denormal = Point()
+    denormal.x = 0
+    denormal.y = 0
+    denormal.z = 0
+    pose = transformation.normalize_position(denormal)
+    return pose
+
+def initial_goal(transformation, goalArray):
+    desired_points = []
+    for (x, y, z) in goalArray:
+        temp = Point()
+        temp.x = x
+        temp.y = y
+        temp.z = z
+        desired_points.append(transformation.normalize_position(temp))
+    return desired_points
+
+
+def initial_orientation(transformation):
+    denormal_roll = 0
+    denormal_pitch = 0
+    denormal_yaw = 0
+    normalized_roll = transformation.normalize_roll(denormal_roll)
+    normalized_pitch = transformation.normalize_pitch(denormal_pitch)
+    normalized_yaw = transformation.normalize_yaw(denormal_yaw)
+    return [normalized_roll, normalized_pitch, normalized_yaw]
+
+
 class DroneTest(robot_gazebo_env.RobotGazeboEnv):
     def __init__(self):
         """
         Make parrotdrone learn how to navigate to get to a point
         """
-        print("runned/n/n/n/n/n/n/n/n")
+        # Get WorkSpace Cube Dimensions
+        self.work_space_x_max = rospy.get_param("/drone/work_space/x_max")
+        self.work_space_x_min = rospy.get_param("/drone/work_space/x_min")
+        self.work_space_y_max = rospy.get_param("/drone/work_space/y_max")
+        self.work_space_y_min = rospy.get_param("/drone/work_space/y_min")
+        self.work_space_z_max = rospy.get_param("/drone/work_space/z_max")
+        self.work_space_z_min = rospy.get_param("/drone/work_space/z_min")
+
+        self.transformation = transforms.Transform(self.work_space_x_min, self.work_space_x_max, self.work_space_y_min,
+                                                   self.work_space_y_max, self.work_space_z_min, self.work_space_z_max)
+        # for finding if the quadcopter has flipped
+        self.max_roll = self.transformation.normalize_roll(np.radians(rospy.get_param("/drone/max_roll")))
+        self.max_pitch = self.transformation.normalize_pitch(np.radians(rospy.get_param("/drone/max_pitch")))
+        self.max_yaw = self.transformation.normalize_yaw(np.radians(rospy.get_param("/drone/max_yaw")))
+
+        self.flip_reward = rospy.get_param("/drone/flip_reward")
+        self.outside_reward = rospy.get_param("/drone/outside_reward")
+
+        # error acceptable for reaching a goal
+        self.desired_point_epsilon = rospy.get_param("/drone/desired_point_epsilon")
+
         self.controllers_list = []
 
         # It doesnt use namespace
@@ -108,7 +133,7 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         # We must read this from ros param server
         self.goal_array = [[0, 0, 3]]
 
-        self.desired_points = initial_goal(self.goal_array)
+        self.desired_points = initial_goal(self.transformation, self.goal_array)
 
         self.cumulated_steps = 0
         self.cumulated_reward = 0
@@ -118,59 +143,43 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         self.goal_index = 0
         self.current_goal = self.desired_points[self.goal_index]
 
-        self.initial_pose = initial_pose()
-        self.current_pose = initial_pose()
+        self.current_pose = initial_pose(self.transformation)
 
-        self.current_orientation = initial_orientation()
+        self.initial_pose = initial_pose(self.transformation)
+
+        self.current_orientation = initial_orientation(self.transformation)
 
         self.current_linear_velocity = initial_linear_angular_velocity()
 
         self.current_angular_velocity = initial_linear_angular_velocity()
 
-        # Get WorkSpace Cube Dimensions
-        self.work_space_x_max = rospy.get_param("/drone/work_space/x_max")
-        self.work_space_x_min = rospy.get_param("/drone/work_space/x_min")
-        self.work_space_y_max = rospy.get_param("/drone/work_space/y_max")
-        self.work_space_y_min = rospy.get_param("/drone/work_space/y_min")
-        self.work_space_z_max = rospy.get_param("/drone/work_space/z_max")
-        self.work_space_z_min = rospy.get_param("/drone/work_space/z_min")
-
-        # for finding if the quadcopter has flipped
-        self.max_roll = rospy.get_param("/drone/max_roll")
-        self.max_pitch = rospy.get_param("/drone/max_pitch")
-
-        self.flip_reward = rospy.get_param("/drone/flip_reward")
-        self.outside_reward = rospy.get_param("/drone/outside_reward")
-
-        # error acceptable for reaching a goal
-        self.desired_point_epsilon = rospy.get_param("/drone/desired_point_epsilon")
-        high = numpy.array([self.work_space_x_max,  # current position
-                            self.work_space_y_max,
-                            self.work_space_z_max,
-
-                            np.inf, np.inf, np.inf,  # current orientation(position in degree) roll pitch yaw
+        high = numpy.array([1,  # current position
+                            1,
+                            1,
+                            # orientation is normalized for better learning
+                            1, 1, 1,  # current orientation(position in degree) roll pitch yaw
 
                             np.inf, np.inf, np.inf,  # linear velocity
 
                             np.inf, np.inf, np.inf,  # angular velocity
 
-                            self.work_space_x_max,  # goal position
-                            self.work_space_y_max,
-                            self.work_space_z_max])
+                            1,  # goal position
+                            1,
+                            1])
 
-        low = numpy.array([self.work_space_x_min,  # current position
-                           self.work_space_y_min,
-                           self.work_space_z_min,
-
-                           -np.inf, -np.inf, -np.inf,  # current orientation(position in degree) roll pitch yaw
+        low = numpy.array([-1,  # current position
+                           -1,
+                           -1,
+                           # orientation is normalized for better learning
+                           -1, -1, -1,  # current orientation(position in degree) roll pitch yaw
 
                            -np.inf, -np.inf, -np.inf,  # linear velocity
 
                            -np.inf, -np.inf, -np.inf,  # angular velocity
 
-                           self.work_space_x_min,  # goal position
-                           self.work_space_y_min,
-                           self.work_space_z_min])
+                           -1,  # goal position
+                           -1,
+                           -1])
         self.observation_space = spaces.Box(low, high)
 
         rospy.logdebug("ACTION SPACES TYPE===>" + str(self.action_space))
@@ -183,17 +192,25 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
     #     # print(msg)
     #     None
 
+
+
     def _set_init_pose(self):  # done
 
         state_msg = ModelState()
         state_msg.model_name = 'Kwad'
-        state_msg.pose.position.x = 0
-        state_msg.pose.position.y = 0
-        state_msg.pose.position.z = 0
-        state_msg.pose.orientation.x = 0
-        state_msg.pose.orientation.y = 0
-        state_msg.pose.orientation.z = 0
-        state_msg.pose.orientation.w = 0
+
+        state_msg.pose.position = initial_pose(self.transformation)
+        normal_orientation = initial_orientation(self.transformation)
+        denormalized_roll = self.transformation.denormalize_roll(normal_orientation[0])
+        denormalized_pitch = self.transformation.denormalize_pitch(normal_orientation[1])
+        denormalized_yaw = self.transformation.denormalizing_yaw(normal_orientation[2])
+
+        orientation = quaternion_from_euler(denormalized_roll, denormalized_pitch, denormalized_yaw)
+
+        state_msg.pose.orientation.x = orientation[0]
+        state_msg.pose.orientation.y = orientation[1]
+        state_msg.pose.orientation.z = orientation[2]
+        state_msg.pose.orientation.w = orientation[3]
 
         rospy.wait_for_service('/gazebo/set_model_state')
         try:
@@ -222,8 +239,9 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
             rospy.loginfo("Get Model State service call failed:  {0}".format(e))
         rospy.logdebug("odom read finished" + str(odom))
         if odom is not None:
-
-            self.current_pose = odom.pose.position
+            denormal_pose = odom.pose.position
+            normal_pose = self.transformation.normalize_position(denormal_pose)
+            self.current_pose = normal_pose
             rospy.logdebug("current pose updated : " + str(self.current_pose))
             self.current_orientation = self.get_orientation_euler(odom.pose.orientation)
             self.current_linear_velocity = odom.twist.linear
@@ -258,11 +276,10 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
 
         self.cumulated_reward = 0
         self.cumulated_steps = 0
-        self.current_pose = initial_pose()
         self.goal_index = 0
-        self.desired_points = initial_goal(self.goal_array)
-        self.current_pose = initial_pose()
-        self.current_orientation = initial_orientation()
+        self.desired_points = initial_goal(self.transformation, self.goal_array)
+        self.current_pose = initial_pose(self.transformation)
+        self.current_orientation = initial_orientation(self.transformation)
         self.current_linear_velocity = initial_linear_angular_velocity()
         self.current_angular_velocity = initial_linear_angular_velocity()
 
@@ -336,19 +353,21 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
 
         return episode_done
 
-    def is_in_desired_position(self, current_position, epsilon=0.05):
+    def is_in_desired_position(self, current_position, alpha=0.05):
         """
         It return True if the current position is similar to the desired poistion
         """
 
+        epsilon = self.transformation.normalize_epsilon(alpha)
+
         is_in_desired_pos = False
 
-        x_pos_plus = self.current_goal.x + epsilon
-        x_pos_minus = self.current_goal.x - epsilon
-        y_pos_plus = self.current_goal.y + epsilon
-        y_pos_minus = self.current_goal.y - epsilon
-        z_pos_plus = self.current_goal.z + epsilon
-        z_pos_minus = self.current_goal.z - epsilon
+        x_pos_plus = self.current_goal.x + epsilon.x
+        x_pos_minus = self.current_goal.x - epsilon.x
+        y_pos_plus = self.current_goal.y + epsilon.y
+        y_pos_minus = self.current_goal.y - epsilon.y
+        z_pos_plus = self.current_goal.z + epsilon.z
+        z_pos_minus = self.current_goal.z - epsilon.z
 
         x_current = current_position.x
         y_current = current_position.y
@@ -378,9 +397,9 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         #     "work_space_z_max" + str(self.work_space_z_max) + ",work_space_z_min=" + str(self.work_space_z_min))
         # rospy.logwarn("############")
 
-        if current_position.x > self.work_space_x_min and current_position.x <= self.work_space_x_max:
-            if current_position.y > self.work_space_y_min and current_position.y <= self.work_space_y_max:
-                if current_position.z > self.work_space_z_min and current_position.z <= self.work_space_z_max:
+        if current_position.x > -1 and current_position.x <= 1:
+            if current_position.y > -1 and current_position.y <= 1:
+                if current_position.z > -1 and current_position.z <= 1:
                     is_inside = True
 
         return is_inside
@@ -396,7 +415,6 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         # rospy.logwarn("max_roll" + str(self.max_roll) + ",min_roll=" + str(-1 * self.max_roll))
         # rospy.logwarn("max_pitch" + str(self.max_pitch) + ",min_pitch=" + str(-1 * self.max_pitch))
         # rospy.logwarn("############")
-
         if -1 * self.max_roll < current_orientation[0] <= self.max_roll:
             if -1 * self.max_pitch < current_orientation[1] <= self.max_pitch:
                 has_flipped = False
@@ -484,7 +502,8 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
                             quaternion_vector.w]
 
         roll, pitch, yaw = euler_from_quaternion(orientation_list)
-        return [roll, pitch, yaw]
+        return [self.transformation.normalize_roll(roll), self.transformation.normalize_pitch(pitch),
+                self.transformation.normalize_yaw(yaw)]
 
     def return_numpy_of_point(self, point):
         return np.array([point.x, point.y, point.z])
@@ -526,4 +545,3 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         distance = numpy.linalg.norm(a - b)
 
         return distance
-
