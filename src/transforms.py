@@ -53,6 +53,19 @@ class Transform:
         normal_point.z = (denormal_z - self.workspace_z_min) / (self.workspace_z_max - self.workspace_z_min)
         return normal_point
 
+    def denormalize_position(self, normal_point):  # oposite of normalization is done here
+        # on x, y and z
+        normal_point_x = normal_point.x
+        normal_point_y = normal_point.y
+        normal_point_z = normal_point.z
+        denormal_point = Point()
+        denormal_point.x = (normal_point_x * (self.workspace_x_max - self.workspace_x_min)) + self.workspace_x_min
+        denormal_point.y = (normal_point_y * (self.workspace_y_max - self.workspace_y_min)) + self.workspace_y_min
+        denormal_point.z = (normal_point_z * (self.workspace_z_max - self.workspace_z_min)) + + self.workspace_z_min
+        return denormal_point
+
+
+
     def normalize_epsilon(self, alpha):
         epsilon = Point()
         epsilon.x = alpha / (self.workspace_x_max - self.workspace_x_min)

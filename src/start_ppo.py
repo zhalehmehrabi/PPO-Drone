@@ -16,7 +16,7 @@ if __name__ == '__main__':
     env = gym.make("DroneTest-v0")
     rospy.loginfo("Gym environment done")
 
-    rospy.init_node('droneTest_qlearn', anonymous=True, log_level=rospy.WARN)
+    rospy.init_node('droneTest_ppo', anonymous=True, log_level=rospy.WARN)
     rospack = rospkg.RosPack()
     pkg_path = rospack.get_path('fly_bot')
     outdir = pkg_path + '/training_results'
@@ -36,7 +36,8 @@ if __name__ == '__main__':
     nsteps = rospy.get_param("/drone/nsteps")
 
     model = PPO("MlpPolicy", env, verbose=1)
-    model.learn(total_timesteps=20_000)
+    model.load(outdir)
+    model.learn(total_timesteps=40_000)
     #
     # obs = env.reset()
     # for i in range(1000):

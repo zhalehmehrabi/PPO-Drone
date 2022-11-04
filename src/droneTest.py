@@ -40,6 +40,7 @@ from tf.transformations import euler_from_quaternion
 from tf.transformations import quaternion_from_euler
 
 import transforms
+import random
 
 timestep_limit_per_episode = 10000  # Can be any Value
 
@@ -58,13 +59,18 @@ def initial_linear_angular_velocity():
     return t
 
 
-def initial_pose(transformation):
+#
+
+
+
+def initial_random_pose(transformation):
     denormal = Point()
-    denormal.x = 0
-    denormal.y = 0
-    denormal.z = 0
+    denormal.x = random.uniform(transformation.workspace_x_min, transformation.workspace_x_max)
+    denormal.y = random.uniform(transformation.workspace_y_min, transformation.workspace_y_max)
+    denormal.z = random.uniform(transformation.workspace_z_min, transformation.workspace_z_max)
     pose = transformation.normalize_position(denormal)
     return pose
+
 
 def initial_goal(transformation, goalArray):
     desired_points = []
@@ -143,9 +149,10 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         self.goal_index = 0
         self.current_goal = self.desired_points[self.goal_index]
 
-        self.current_pose = initial_pose(self.transformation)
+        self.initial_pose = initial_random_pose(self.transformation)
 
-        self.initial_pose = initial_pose(self.transformation)
+        self.current_pose = self.initial_pose
+
 
         self.current_orientation = initial_orientation(self.transformation)
 
@@ -187,19 +194,52 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
 
         # self.sub_state = rospy.Subscriber("/gazebo/model_states", ModelStates, self.func_state)
         self.pub_command = rospy.Publisher("/Kwad/joint_motor_controller/command", Float64MultiArray, queue_size=1)
+        self.pub_init_pos = rospy.Publisher("/gazebo/set_model_state", ModelState, queue_size=1)
 
     # def func_state(self, msg):
     #     # print(msg)
     #     None
 
 
+    def _reset_sim(self):
+        """Resets a simulation
+        """
+        rospy.logdebug("RESET SIM START")
+        if self.reset_controls :
+            rospy.logdebug("RESET CONTROLLERS")
+            self.gazebo.unpauseSim()
+            self.controllers_object.reset_controllers()
+            self._check_all_systems_ready()
+            self.gazebo.pauseSim()
+            self.gazebo.resetSim()
+            self._set_init_pose()
+            self.gazebo.unpauseSim()
+            self.controllers_object.reset_controllers()
+            self._check_all_systems_ready()
+            self.gazebo.pauseSim()
+
+        else:
+            rospy.logdebug("DONT RESET CONTROLLERS")
+            self.gazebo.unpauseSim()
+            self._check_all_systems_ready()
+            self.gazebo.pauseSim()
+            self.gazebo.resetSim()
+            self._set_init_pose()
+            self.gazebo.unpauseSim()
+            self._check_all_systems_ready()
+            self.gazebo.pauseSim()
+
+        rospy.logdebug("RESET SIM END")
+        return True
 
     def _set_init_pose(self):  # done
 
         state_msg = ModelState()
-        state_msg.model_name = 'Kwad'
+        state_msg.model_name = "Kwad"
 
-        state_msg.pose.position = initial_pose(self.transformation)
+        state_msg.pose.position = self.transformation.denormalize_position(self.initial_pose)
+        rospy.logwarn(f"initial pose = {state_msg.pose.position}")
+
         normal_orientation = initial_orientation(self.transformation)
         denormalized_roll = self.transformation.denormalize_roll(normal_orientation[0])
         denormalized_pitch = self.transformation.denormalize_pitch(normal_orientation[1])
@@ -212,10 +252,13 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         state_msg.pose.orientation.z = orientation[2]
         state_msg.pose.orientation.w = orientation[3]
 
+        state_msg.twist.linear = initial_linear_angular_velocity()
+        state_msg.twist.angular = initial_linear_angular_velocity()
         rospy.wait_for_service('/gazebo/set_model_state')
         try:
             set_state = rospy.ServiceProxy('/gazebo/set_model_state', SetModelState)
             resp = set_state(state_msg)
+            rospy.logerr(f"status of set init pose: {resp}")
         except rospy.ServiceException as e:
             print("Service call failed: %s" % e)
 
@@ -270,7 +313,8 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         return observation
 
     def _init_env_variables(self):  # done
-        """Inits variables needed to be initialised each time we reset at the start
+        """
+        Inits variables needed to be initialised each time we reset at the start
         of an episode.
         """
 
@@ -278,7 +322,8 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         self.cumulated_steps = 0
         self.goal_index = 0
         self.desired_points = initial_goal(self.transformation, self.goal_array)
-        self.current_pose = initial_pose(self.transformation)
+        self.initial_pose = initial_random_pose(self.transformation)
+        self.current_pose = self.initial_pose
         self.current_orientation = initial_orientation(self.transformation)
         self.current_linear_velocity = initial_linear_angular_velocity()
         self.current_angular_velocity = initial_linear_angular_velocity()
@@ -359,7 +404,7 @@ class DroneTest(robot_gazebo_env.RobotGazeboEnv):
         """
 
         epsilon = self.transformation.normalize_epsilon(alpha)
-
+        # rospy.logwarn(f"alpha = {alpha}, epsilon.x = {epsilon.x}, epsilon.y = {epsilon.y}, epsilon.z = {epsilon.z}")
         is_in_desired_pos = False
 
         x_pos_plus = self.current_goal.x + epsilon.x
