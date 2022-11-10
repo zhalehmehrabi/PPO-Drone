@@ -13,12 +13,15 @@ import rospkg
 import droneTest
 import torch as th
 import os
-import optuna
+import pickle as pkl
 
 import os
 
 import optuna
 from optuna.trial import TrialState
+from optuna.pruners import MedianPruner
+from optuna.samplers import TPESampler
+from optuna.visualization import plot_optimization_history, plot_param_importances
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,12 +29,55 @@ import torch.optim as optim
 import torch.utils.data
 
 DEVICE = torch.device("cuda")
-BATCHSIZE = 128
-CLASSES = 10
-DIR = os.getcwd()
-EPOCHS = 10
-N_TRAIN_EXAMPLES = BATCHSIZE * 30
-N_VALID_EXAMPLES = BATCHSIZE * 10
+
+N_TRIALS = 100
+N_STARTUP_TRIALS = 5
+N_EVALUATIONS = 2
+N_TIMESTEPS = int(2e4)
+EVAL_FREQ = int(N_TIMESTEPS / N_EVALUATIONS)
+N_EVAL_EPISODES = 5
+N_EVAL_ENVS = 1
+TIMEOUT = int(60 * 15)  # 15 minutes
+
+
+EPOCHS = 2
+ENV_ID = "DroneTest-v0"
+
+
+class TrialEvalCallback(EvalCallback):
+    """Callback used for evaluating and reporting a trial."""
+
+    def __init__(
+            self,
+            env,
+            trial: optuna.Trial,
+            n_eval_episodes: int = 5,
+            eval_freq: int = 10000,
+            deterministic: bool = True,
+            verbose: int = 0,
+    ):
+
+        super().__init__(
+            eval_env=env,
+            n_eval_episodes=n_eval_episodes,
+            eval_freq=eval_freq,
+            deterministic=deterministic,
+            verbose=verbose,
+        )
+        self.trial = trial
+        self.eval_idx = 0
+        self.is_pruned = False
+
+    def _on_step(self) -> bool:
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            super()._on_step()
+            self.eval_idx += 1
+            self.trial.report(self.last_mean_reward, self.eval_idx)
+            # Prune trial if need
+            if self.trial.should_prune():
+                self.is_pruned = True
+                return False
+        return True
 
 
 def define_model(trial):
@@ -72,28 +118,57 @@ def define_model(trial):
         ent_coef=ent_coef,  # Entropy coefficient for the loss calculation
     )
     # Create the agent
-    model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=1, **hyperparams)
+    model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=0, **hyperparams)
     return model
 
 
 def objective(trial):
-    # Generate the model.
+    print(1)
     model = define_model(trial)
+    print(2)
+    eval_callback = TrialEvalCallback(
+        env,
+        trial,
+        n_eval_episodes=N_EVAL_EPISODES,
+        eval_freq=EVAL_FREQ,
+        deterministic=True,
+    )
+    print(3)
+    nan_encountered = False
+    print(4)
+    try:
+        model.learn(N_TIMESTEPS, callback=eval_callback)
+    except AssertionError as e:
+        # Sometimes, random hyperparams can generate NaN
+        print(e)
+        nan_encountered = True
+    print(5)
+    # Tell the optimizer that the trial failed
+    if nan_encountered:
+        return float("nan")
+    print(6)
+    if eval_callback.is_pruned:
+        raise optuna.exceptions.TrialPruned()
+    print(7)
+    return eval_callback.last_mean_reward
 
-    for epoch in range(EPOCHS):
-        rospy.logwarn("start learning")
-        model.learn(100)
-        rospy.logwarn("learning finished, evaluation start")
-        mean_reward, std_reward = evaluate_policy(model, model.get_env(), n_eval_episodes=1, deterministic=True)
-        rospy.logwarn("evaluation finished")
-        trial.report(mean_reward, epoch)
-        rospy.logwarn(f"Epoch {epoch} finished")
-        # Handle pruning based on the intermediate value.
-        if trial.should_prune():
-            raise optuna.exceptions.TrialPruned()
-    rospy.logwarn("Trial finished")
-    return mean_reward
-
+# def objective(trial):
+#     # Generate the model.
+#     model = define_model(trial)
+#
+#     for epoch in range(EPOCHS):
+#         rospy.logwarn("start learning")
+#         model.learn(1000)
+#         rospy.logwarn("learning finished, evaluation start")
+#         mean_reward, std_reward = evaluate_policy(model, model.get_env(), n_eval_episodes=1, deterministic=True)
+#         rospy.logwarn("evaluation finished")
+#         trial.report(mean_reward, epoch)
+#         rospy.logwarn(f"Epoch {epoch} finished")
+#         # Handle pruning based on the intermediate value.
+#         if trial.should_prune():
+#             raise optuna.exceptions.TrialPruned()
+#     rospy.logwarn("Trial finished")
+#     return mean_reward
 
 if __name__ == '__main__':
 
@@ -111,8 +186,13 @@ if __name__ == '__main__':
 
     last_time_steps = numpy.ndarray(0)
 
-    study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=100, timeout=600)
+    sampler = TPESampler(n_startup_trials=N_STARTUP_TRIALS)
+    # Do not prune before 1/3 of the max budget is used
+    pruner = MedianPruner(
+        n_startup_trials=N_STARTUP_TRIALS, n_warmup_steps=N_EVALUATIONS // 3
+    )
+    study = optuna.create_study(sampler=sampler, pruner=pruner, direction="maximize")
+    study.optimize(objective, n_trials=N_TRIALS, timeout=TIMEOUT)
 
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
@@ -130,3 +210,14 @@ if __name__ == '__main__':
     print("  Params: ")
     for key, value in trial.params.items():
         print("    {}: {}".format(key, value))
+    # Write report
+    study.trials_dataframe().to_csv("study_results_a2c_cartpole.csv")
+
+    with open("study.pkl", "wb+") as f:
+        pkl.dump(study, f)
+
+    fig1 = plot_optimization_history(study)
+    fig2 = plot_param_importances(study)
+
+    fig1.show()
+    fig2.show()
