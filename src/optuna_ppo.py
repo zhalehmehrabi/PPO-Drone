@@ -14,7 +14,7 @@ import droneTest
 import torch as th
 import os
 import pickle as pkl
-
+import joblib
 import os
 
 import optuna
@@ -28,6 +28,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 import torch.utils.data
 
+
+from datetime import datetime
+
 DEVICE = torch.device("cuda")
 
 N_TRIALS = 100
@@ -37,7 +40,7 @@ N_TIMESTEPS = int(2e4)
 EVAL_FREQ = int(N_TIMESTEPS / N_EVALUATIONS)
 N_EVAL_EPISODES = 5
 N_EVAL_ENVS = 1
-TIMEOUT = int(60 * 15)  # 15 minutes
+TIMEOUT = int(60 * 30)  # 15 minutes
 
 
 EPOCHS = 2
@@ -123,9 +126,7 @@ def define_model(trial):
 
 
 def objective(trial):
-    print(1)
     model = define_model(trial)
-    print(2)
     eval_callback = TrialEvalCallback(
         env,
         trial,
@@ -133,9 +134,8 @@ def objective(trial):
         eval_freq=EVAL_FREQ,
         deterministic=True,
     )
-    print(3)
     nan_encountered = False
-    print(4)
+
     try:
         model.learn(N_TIMESTEPS, callback=eval_callback)
     except AssertionError as e:
@@ -191,9 +191,17 @@ if __name__ == '__main__':
     pruner = MedianPruner(
         n_startup_trials=N_STARTUP_TRIALS, n_warmup_steps=N_EVALUATIONS // 3
     )
-    study = optuna.create_study(sampler=sampler, pruner=pruner, direction="maximize")
-    study.optimize(objective, n_trials=N_TRIALS, timeout=TIMEOUT)
+    # study = optuna.create_study(sampler=sampler, pruner=pruner, direction="maximize")
+    study = joblib.load(outdir + "/study.pkl")
+    now = datetime.now()
 
+    current_time = now.strftime("%H:%M:%S")
+    print("Current Time =", current_time)
+    study.optimize(objective, n_trials=N_TRIALS, timeout=TIMEOUT)
+    now = datetime.now()
+
+    current_time = now.strftime("%H:%M:%S")
+    print("Current Time =", current_time)
     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
 
@@ -211,9 +219,9 @@ if __name__ == '__main__':
     for key, value in trial.params.items():
         print("    {}: {}".format(key, value))
     # Write report
-    study.trials_dataframe().to_csv("study_results_a2c_cartpole.csv")
-
-    with open("study.pkl", "wb+") as f:
+    study.trials_dataframe().to_csv(outdir + "study_results_a2c_cartpole.csv")
+    joblib.dump(study, "study.pkl")
+    with open(outdir+"/study.pkl", "wb+") as f:
         pkl.dump(study, f)
 
     fig1 = plot_optimization_history(study)
